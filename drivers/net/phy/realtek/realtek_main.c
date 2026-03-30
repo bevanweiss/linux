@@ -150,6 +150,22 @@
 
 #define RTL8221B_VND2_INSR			0xa4d4
 
+#define RTL8221B_VND2_LCR2			0xd032
+#define RTL8221B_VND2_LCR3			0xd034
+#define RTL8221B_VND2_LCR4			0xd036
+#define RTL8221B_VND2_LCR_REG(x)		(RTL8221B_VND2_LCR2 + ((x) * 2))
+#define  RTL8221B_VND2_LCR_LINK_10		BIT(0)
+#define  RTL8221B_VND2_LCR_LINK_100		BIT(1)
+#define  RTL8221B_VND2_LCR_LINK_1000	BIT(2)
+#define  RTL8221B_VND2_LCR_LINK_2500	BIT(5)
+#define RTL8221B_VND2_LCR6			0xd040
+#define  RTL8221B_VND2_LCR6_MODE		BIT(5)
+#define  RTL8221B_VND2_LCR6_ACT(x)		BIT((x))
+#define RTL8221B_VND2_LCR7			0xd044
+#define  RTL8221B_VND2_LCR7_EN(x)		BIT((x) + 4)
+#define  RTL8221B_VND2_LCR7_POL(x)		BIT((x))
+#define RTL8221B_LED_COUNT			3
+
 #define RTL8224_MII_RTCT			0x11
 #define RTL8224_MII_RTCT_ENABLE			BIT(0)
 #define RTL8224_MII_RTCT_PAIR_A			BIT(4)
@@ -2194,6 +2210,180 @@ static irqreturn_t rtl8221b_handle_interrupt(struct phy_device *phydev)
 	return IRQ_HANDLED;
 }
 
+static int rtl8221b_led_hw_is_supported(struct phy_device *phydev, u8 index,
+					unsigned long rules)
+{
+	const unsigned long mask = BIT(TRIGGER_NETDEV_LINK) |
+				   BIT(TRIGGER_NETDEV_LINK_10) |
+				   BIT(TRIGGER_NETDEV_LINK_100) |
+				   BIT(TRIGGER_NETDEV_LINK_1000) |
+				   BIT(TRIGGER_NETDEV_LINK_2500) |
+				   BIT(TRIGGER_NETDEV_RX) |
+				   BIT(TRIGGER_NETDEV_TX);
+
+	/* The RTL8221B PHY supports these LED settings on up to three LEDs:
+	 * - Link: Configurable subset of 10/100/1000/2500 link rates
+	 * - Active: Blink on activity, RX or TX is not differentiated
+	 * The Active option has two modes, A and B:
+	 * - A: Link and Active indication at configurable, but matching,
+	 *      subset of 10/100/1000/2500 link rates
+	 * - B: Link indication at configurable subset of 10/100/1000/2500 link
+	 *      rates and Active indication always at all link rates.
+	 * This code currently uses mode B only.
+	 * Mode is shared between all three LEDS, so it is not possible to have one
+	 * LED in mode A and another in mode B.
+	 */
+
+	if (index >= RTL8221B_LED_COUNT)
+		return -EINVAL;
+
+	/* Filter out any other unsupported triggers. */
+	if (rules & ~mask)
+		return -EOPNOTSUPP;
+
+	/* RX and TX are not differentiated, either both are set or not set. */
+	if (!(rules & BIT(TRIGGER_NETDEV_RX)) ^ !(rules & BIT(TRIGGER_NETDEV_TX)))
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static int rtl8221b_led_hw_control_get(struct phy_device *phydev, u8 index,
+				       unsigned long *rules)
+{
+	int val;
+	u32 reg;
+
+	if (index >= RTL8221B_LED_COUNT)
+		return -EINVAL;
+
+	reg = RTL8221B_VND2_LCR_REG(index);
+
+	/* Check if the LED is enabled, and if not don't set any rules */
+	val = phy_read_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_LCR7);
+	if (val < 0)
+		return val;
+	if (!(val & RTL8221B_VND2_LCR7_EN(index)))
+		return 0;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_VEND2, reg);
+	if (val < 0)
+		return val;
+
+	if (val & RTL8221B_VND2_LCR_LINK_10)
+		__set_bit(TRIGGER_NETDEV_LINK_10, rules);
+
+	if (val & RTL8221B_VND2_LCR_LINK_100)
+		__set_bit(TRIGGER_NETDEV_LINK_100, rules);
+
+	if (val & RTL8221B_VND2_LCR_LINK_1000)
+		__set_bit(TRIGGER_NETDEV_LINK_1000, rules);
+
+	if (val & RTL8221B_VND2_LCR_LINK_2500)
+		__set_bit(TRIGGER_NETDEV_LINK_2500, rules);
+
+	if ((val & RTL8221B_VND2_LCR_LINK_10) &&
+	    (val & RTL8221B_VND2_LCR_LINK_100) &&
+	    (val & RTL8221B_VND2_LCR_LINK_1000) &&
+	    (val & RTL8221B_VND2_LCR_LINK_2500)) {
+		__set_bit(TRIGGER_NETDEV_LINK, rules);
+	}
+
+	val = phy_read_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_LCR6);
+	if (val < 0)
+		return val;
+
+	if (val & RTL8221B_VND2_LCR6_ACT(index)) {
+		__set_bit(TRIGGER_NETDEV_RX, rules);
+		__set_bit(TRIGGER_NETDEV_TX, rules);
+	}
+
+	return 0;
+}
+
+static int rtl8221b_led_hw_control_set(struct phy_device *phydev, u8 index,
+				       unsigned long rules)
+{
+	u32 reg;
+	u16 val = 0, mask = 0;
+	int ret;
+
+	if (index >= RTL8221B_LED_COUNT)
+		return -EINVAL;
+
+	reg = RTL8221B_VND2_LCR_REG(index);
+
+	/* Check if there are any rules, if not disable LED and exit */
+	if (!rules)
+		return phy_modify_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_LCR7,
+			RTL8221B_VND2_LCR7_EN(index), 0);
+
+	if (test_bit(TRIGGER_NETDEV_LINK, &rules) ||
+	    test_bit(TRIGGER_NETDEV_LINK_10, &rules)) {
+		val |= RTL8221B_VND2_LCR_LINK_10;
+	}
+
+	if (test_bit(TRIGGER_NETDEV_LINK, &rules) ||
+	    test_bit(TRIGGER_NETDEV_LINK_100, &rules)) {
+		val |= RTL8221B_VND2_LCR_LINK_100;
+	}
+
+	if (test_bit(TRIGGER_NETDEV_LINK, &rules) ||
+	    test_bit(TRIGGER_NETDEV_LINK_1000, &rules)) {
+		val |= RTL8221B_VND2_LCR_LINK_1000;
+	}
+
+	if (test_bit(TRIGGER_NETDEV_LINK, &rules) ||
+	    test_bit(TRIGGER_NETDEV_LINK_2500, &rules)) {
+		val |= RTL8221B_VND2_LCR_LINK_2500;
+	}
+
+	ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, reg, val);
+	if (ret < 0)
+		return ret;
+
+	val = RTL8221B_VND2_LCR6_MODE;
+	if (test_bit(TRIGGER_NETDEV_RX, &rules) ||
+	    test_bit(TRIGGER_NETDEV_TX, &rules)) {
+		val |= RTL8221B_VND2_LCR6_ACT(index);
+	}
+
+	mask = RTL8221B_VND2_LCR6_ACT(index) | RTL8221B_VND2_LCR6_MODE;
+	ret = phy_modify_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_LCR6, mask, val);
+	if (ret < 0)
+		return ret;
+
+	return phy_modify_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_LCR7,
+						RTL8221B_VND2_LCR7_EN(index),
+						RTL8221B_VND2_LCR7_EN(index));
+}
+
+static int rtl8221b_led_polarity_set(struct phy_device *phydev, int index, unsigned long modes)
+{
+	bool led_active_low = false;
+	u32 mode;
+
+	if (index >= RTL8221B_LED_COUNT)
+		return -EINVAL;
+
+	for_each_set_bit(mode, &modes, __PHY_LED_MODES_NUM) {
+		switch (mode) {
+		case PHY_LED_ACTIVE_LOW:
+			led_active_low = true;
+			break;
+		case PHY_LED_ACTIVE_HIGH: /* default mode */
+		led_active_low = false;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return phy_modify_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_LCR7,
+						RTL8221B_VND2_LCR7_POL(index),
+						led_active_low ? 0 : RTL8221B_VND2_LCR7_POL(index));
+}
+
 static int rtlgen_sfp_get_features(struct phy_device *phydev)
 {
 	linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
@@ -2427,6 +2617,10 @@ static struct phy_driver realtek_drvs[] = {
 		.write_page	= rtl821x_write_page,
 		.read_mmd	= rtl822xb_read_mmd,
 		.write_mmd	= rtl822xb_write_mmd,
+		.led_hw_is_supported = rtl8221b_led_hw_is_supported,
+		.led_hw_control_get = rtl8221b_led_hw_control_get,
+		.led_hw_control_set = rtl8221b_led_hw_control_set,
+		.led_polarity_set = rtl8221b_led_polarity_set,
 	}, {
 		.match_phy_device = rtl8221b_vm_cg_match_phy_device,
 		.name		= "RTL8221B-VM-CG 2.5Gbps PHY",
@@ -2446,6 +2640,10 @@ static struct phy_driver realtek_drvs[] = {
 		.write_page	= rtl821x_write_page,
 		.read_mmd	= rtl822xb_read_mmd,
 		.write_mmd	= rtl822xb_write_mmd,
+		.led_hw_is_supported = rtl8221b_led_hw_is_supported,
+		.led_hw_control_get = rtl8221b_led_hw_control_get,
+		.led_hw_control_set = rtl8221b_led_hw_control_set,
+		.led_polarity_set = rtl8221b_led_polarity_set,
 	}, {
 		.match_phy_device = rtl8251b_c45_match_phy_device,
 		.name		= "RTL8251B 5Gbps PHY",
