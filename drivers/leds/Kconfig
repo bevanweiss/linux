@@ -903,14 +903,16 @@ config LEDS_POWERNV
 	  will be called leds-powernv.
 
 config LEDS_SYSCON
-	bool "LED support for LEDs on system controllers"
-	depends on LEDS_CLASS=y
+	tristate "LED support for LEDs on system controllers"
+	depends on LEDS_CLASS
 	depends on MFD_SYSCON
 	depends on OF
 	help
 	  This option enables support for the LEDs on syscon type
 	  devices. This will only work with device tree enabled
 	  devices.
+	  To compile this driver as a module, choose 'm' here: the module
+	  will be called leds-syscon.
 
 config LEDS_PM8058
 	tristate "LED Support for the Qualcomm PM8058 PMIC"
