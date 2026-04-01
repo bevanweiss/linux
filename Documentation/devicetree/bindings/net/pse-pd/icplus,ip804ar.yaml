@@ -1,0 +1,203 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/pse-pd/icplus,ip804ar.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: IC Plus IP804AR 4-Port PSE Controller
+
+maintainers:
+  - Bevan Weiss <bevan.weiss@gmail.com>
+
+allOf:
+  - $ref: pse-controller.yaml#
+
+description: |
+  The IP804AR is a 4-port PSE (Power Sourcing Equipment) controller IC for
+  PoE (Power over Ethernet) systems. It integrates power, analog and logic
+  circuits into a single chip, and can be used for Midspan and Endpoint PSE
+  applications.
+
+  The device supports IEEE 802.3af-2003 and 802.3at-2009 standards, providing
+  up to 30W per port in 2-pair mode, or up to 60W per port in 4-pair mode
+  (where ports 0+1 or ports 2+3 are paired).
+
+  The device uses an I2C interface for control and monitoring, with an
+  optional interrupt line for event notification.
+
+properties:
+  compatible:
+    enum:
+      - icplus,ip804ar
+
+  reg:
+    maxItems: 1
+    description:
+      I2C device address. The 3 LSBs of the address are set by the AD2-AD0
+      pins on the chip, allowing up to 8 devices on one I2C bus.
+
+  interrupts:
+    maxItems: 1
+    description:
+      Interrupt for the INTB pin. This pin is open-drain and active low,
+      providing interrupt-driven event notification for port status changes,
+      overload conditions, thermal events, and PD detection/classification.
+
+  pse-pis:
+    description:
+      Optional subnode describing the PSE Power Interfaces. When present,
+      each pse-pi represents a logical PoE port. For 2-pair operation,
+      specify only one pairset per PI. For 4-pair (60W) operation, specify
+      both alternative-a and alternative-b pairsets.
+
+    type: object
+    additionalProperties: false
+
+    properties:
+      "#address-cells":
+        const: 1
+
+      "#size-cells":
+        const: 0
+
+    required:
+      - "#address-cells"
+      - "#size-cells"
+
+    patternProperties:
+      "^pse-pi@[0-7]$":
+        type: object
+        additionalProperties: false
+
+        properties:
+          reg:
+            description:
+              Port index (0-3) corresponding to the physical port on the
+              IP804AR.
+            maxItems: 1
+
+          "#pse-cells":
+            const: 0
+
+          pairset-names:
+            description:
+              Names of the pairsets used by this PI. For 2-pair operation,
+              use either "alternative-a" or "alternative-b". For 4-pair
+              (60W) operation, use both "alternative-a" and "alternative-b".
+            minItems: 1
+            maxItems: 2
+            items:
+              enum:
+                - alternative-a
+                - alternative-b
+
+          pairsets:
+            $ref: /schemas/types.yaml#/definitions/phandle-array
+            description:
+              Phandles pointing to the power supply for each pairset.
+              Typically all pairsets point to the same VPWR regulator.
+            minItems: 1
+            maxItems: 2
+
+          vpwr-supply:
+            description:
+              Regulator providing power to the PSE PI.
+
+        required:
+          - reg
+          - "#pse-cells"
+
+oneOf:
+  - required:
+      - compatible
+      - reg
+      - "#pse-cells"
+  - required:
+      - compatible
+      - reg
+      - pse-pis
+
+unevaluatedProperties: false
+
+examples:
+  # Example 1: Simple configuration for 2-pair 802.3af/at
+  # Driver auto-registers 4 independent ports when no pse-pis node is used.
+  # The ethernet-phy references port 0 using the pses property.
+  - |
+    i2c {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      ethernet_pse_simple: ethernet-pse@24 {
+        compatible = "icplus,ip804ar";
+        reg = <0x24>;
+        #pse-cells = <0>;
+        interrupt-parent = <&gpio0>;
+        interrupts = <5 IRQ_TYPE_EDGE_FALLING>;
+      };
+    };
+
+    mdio {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      ethphy0: ethernet-phy@0 {
+        reg = <0>;
+        pses = <&ethernet_pse_simple 0>;
+      };
+    };
+
+  # Example 2: Complex configuration with pse-pis for 4-pair (60W) support.
+  # Two PSE PIs are defined, each with both pairsets for 4-pair operation.
+  # Ports 0+1 are paired for PI 0, ports 2+3 are paired for PI 1.
+  - |
+    i2c {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      reg_pse: regulator-pse {
+        compatible = "regulator-fixed";
+        regulator-name = "pse-vpwr";
+        regulator-min-microvolt = <50000000>;
+        regulator-max-microvolt = <57000000>;
+      };
+
+      ethernet_pse_complex: ethernet-pse@24 {
+        compatible = "icplus,ip804ar";
+        reg = <0x24>;
+        interrupt-parent = <&gpio0>;
+        interrupts = <5 IRQ_TYPE_EDGE_FALLING>;
+
+        pse-pis {
+          #address-cells = <1>;
+          #size-cells = <0>;
+
+          pse_pi0: pse-pi@0 {
+            reg = <0>;
+            #pse-cells = <0>;
+            pairset-names = "alternative-a", "alternative-b";
+            pairsets = <&reg_pse>, <&reg_pse>;
+            vpwr-supply = <&reg_pse>;
+          };
+
+          pse_pi1: pse-pi@1 {
+            reg = <1>;
+            #pse-cells = <0>;
+            pairset-names = "alternative-a", "alternative-b";
+            pairsets = <&reg_pse>, <&reg_pse>;
+            vpwr-supply = <&reg_pse>;
+          };
+        };
+      };
+    };
+
+    mdio {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      ethphy0_4pair: ethernet-phy@0 {
+        reg = <0>;
+        pses = <&ethernet_pse_complex 0>;
+      };
+    };
+...
