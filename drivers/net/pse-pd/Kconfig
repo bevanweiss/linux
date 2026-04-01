@@ -20,6 +20,16 @@ config PSE_REGULATOR
 	  Sourcing Equipment without automatic classification support. For
 	  example for basic implementation of PoDL (802.3bu) specification.
 
+config PSE_IP804AR
+	tristate "IP804AR PSE controller"
+	depends on I2C
+	help
+	  This module provides support for the IC Plus IP804AR 4-port PSE
+	  controller for IEEE 802.3af/at PoE systems.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ip804ar.
+
 config PSE_PD692X0
 	tristate "PD692X0 PSE controller"
 	depends on I2C
@@ -52,4 +62,5 @@ config PSE_TPS23881
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called tps23881.
+
 endif
